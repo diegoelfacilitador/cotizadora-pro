@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef } from "react";
 
 const fmt = (n) => new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(n);
 const fmtUF = (n) => n.toFixed(1) + " UF";
@@ -11,8 +11,6 @@ const R0=[
   {id:2,nombre:"Facilitador Senior",terreno:4,back:3.5},
   {id:3,nombre:"Facilitador Junior",terreno:2.5,back:2},
 ];
-
-const F_EMPTY=[];
 
 const calcFase=(f,roles)=>{
   const a=f.asig.reduce((s,a)=>{const r=roles.find(x=>x.id===a.rId);return r?s+a.hT*r.terreno+a.hB*r.back:s;},0);
@@ -37,7 +35,60 @@ function injectCSS(){
   document.head.appendChild(s);
 }
 
-// ── API Key modal ──
+async function generateFases(transcript, roles, apiKey){
+  const roleList=roles.map(r=>`- id:${r.id} "${r.nombre}" (terreno:${r.terreno}UF/h, back:${r.back}UF/h)`).join("\n");
+  const prompt=`Eres un asistente experto en consultoría facilitada. El usuario describió verbalmente un proyecto. Tu tarea es estructurar esa descripción en fases de consultoría.
+
+ROLES DISPONIBLES:
+${roleList}
+
+DESCRIPCIÓN DEL USUARIO (puede tener titubeos, repeticiones, lenguaje informal):
+"${transcript}"
+
+Responde SOLO con un JSON válido, sin texto adicional, con esta estructura exacta:
+{
+  "nombre": "Nombre del proyecto",
+  "cliente": "Nombre del cliente o vacío",
+  "fases": [
+    {
+      "id": 1,
+      "nombre": "Nombre de la fase",
+      "mod": "Presencial",
+      "tipo": "Ejecucion",
+      "desc": "Descripción breve y clara de la fase",
+      "asig": [{"rId": 1, "hT": 4, "hB": 2}],
+      "trasl": [{"cat": "Pasaje aereo", "uf": 1.0}],
+      "mat": [{"desc": "Materiales", "uf": 0.5}]
+    }
+  ]
+}
+
+Reglas:
+- Extrae solo información relevante, ignora titubeos y repeticiones
+- Si no se menciona un dato, usa valores razonables basados en el contexto
+- hT = horas en terreno, hB = horas de back office
+- mod puede ser "Presencial" o "Remoto"
+- tipo puede ser "Ejecucion", "Gabinete", "Entregable" o "Seguimiento"
+- Las categorías de traslado válidas son: Pasaje aereo, Arriendo vehiculo, Bencina, Viaticos alojamiento, Viaticos alimentacion, Otros
+- Si no hay traslados o materiales, usa arreglos vacíos
+- Genera entre 3 y 8 fases según la complejidad descrita`;
+
+  const res = await fetch("/api/claude", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+    },
+    body: JSON.stringify({ prompt }),
+  });
+
+  if(!res.ok) throw new Error("Error API: " + res.status);
+  const data = await res.json();
+  const text = data.content[0].text;
+  const clean = text.replace(/```json|```/g, "").trim();
+  return JSON.parse(clean);
+}
+
 function ApiKeyModal({onSave}){
   const [k,setK]=useState("");
   return (
@@ -63,10 +114,8 @@ function ApiKeyModal({onSave}){
   );
 }
 
-// ── Voice Button ──
 function VoiceButton({onTranscript,disabled}){
   const [rec,setRec]=useState(false);
-  const [pulse,setPulse]=useState(false);
   const srRef=useRef(null);
 
   const start=()=>{
@@ -78,13 +127,13 @@ function VoiceButton({onTranscript,disabled}){
       const txt=Array.from(e.results).map(r=>r[0].transcript).join(" ");
       onTranscript(txt);
     };
-    sr.onerror=()=>{setRec(false);setPulse(false);};
-    sr.onend=()=>{setRec(false);setPulse(false);};
+    sr.onerror=()=>{setRec(false);};
+    sr.onend=()=>{setRec(false);};
     sr.start();srRef.current=sr;
-    setRec(true);setPulse(true);
+    setRec(true);
   };
 
-  const stop=()=>{srRef.current?.stop();setRec(false);setPulse(false);};
+  const stop=()=>{srRef.current?.stop();setRec(false);};
 
   return (
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12,padding:"24px 0"}}>
@@ -93,70 +142,20 @@ function VoiceButton({onTranscript,disabled}){
         style={{
           width:80,height:80,borderRadius:"50%",border:"none",cursor:disabled?"default":"pointer",
           background:rec?"#7f1d1d":FAINT,
-          boxShadow:pulse?"0 0 0 12px rgba(248,113,113,0.2), 0 0 0 24px rgba(248,113,113,0.08)":"none",
+          boxShadow:rec?"0 0 0 12px rgba(248,113,113,0.2), 0 0 0 24px rgba(248,113,113,0.08)":"none",
           transition:"all 0.3s",display:"flex",alignItems:"center",justifyContent:"center",fontSize:32
         }}
       >
         {rec?"⏹":"🎙"}
       </button>
       <span style={{fontSize:12,color:rec?RED:MUT,fontWeight:rec?700:400}}>
-        {disabled?"Cargando...":rec?"Grabando... (clic para detener)":"Clic para hablar"}
+        {disabled?"Procesando...":rec?"Grabando... (clic para detener)":"Clic para hablar"}
       </span>
       {rec&&<span style={{fontSize:11,color:"#555",maxWidth:280,textAlign:"center",lineHeight:1.5}}>Describe el proyecto: cliente, fases, equipo, traslados, materiales...</span>}
     </div>
   );
 }
 
-// ── AI processing ──
-async function generateFases(transcript, roles, apiKey){
-  const roleList=roles.map(r=>`- id:${r.id} "${r.nombre}" (terreno:${r.terreno}UF/h, back:${r.back}UF/h)`).join("\n");
-  const prompt=`Eres un asistente experto en consultoría facilitada. El usuario describió verbalmente un proyecto. Tu tarea es estructurar esa descripción en fases de consultoría.
-
-ROLES DISPONIBLES:
-${roleList}
-
-DESCRIPCIÓN DEL USUARIO (puede tener titubeos, repeticiones, lenguaje informal):
-"${transcript}"
-
-Responde SOLO con un JSON válido, sin texto adicional, con esta estructura exacta:
-{
-  "nombre": "Nombre del proyecto",
-  "cliente": "Nombre del cliente o vacío",
-  "fases": [
-    {
-      "id": 1,
-      "nombre": "Nombre de la fase",
-      "mod": "Presencial" o "Remoto",
-      "tipo": "Ejecucion" o "Gabinete" o "Entregable" o "Seguimiento",
-      "desc": "Descripción breve y clara de la fase",
-      "asig": [{"rId": 1, "hT": 4, "hB": 2}],
-      "trasl": [{"cat": "Pasaje aereo", "uf": 1.0}],
-      "mat": [{"desc": "Materiales", "uf": 0.5}]
-    }
-  ]
-}
-
-Reglas:
-- Extrae solo información relevante, ignora titubeos y repeticiones
-- Si no se menciona un dato, usa valores razonables basados en el contexto
-- hT = horas en terreno, hB = horas de back office
-- Las categorías de traslado válidas son: Pasaje aereo, Arriendo vehiculo, Bencina, Viaticos alojamiento, Viaticos alimentacion, Otros
-- Si no hay traslados o materiales, usa arreglos vacíos
-- Genera entre 3 y 8 fases según la complejidad descrita`;
-
-  const res=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:prompt}]})
-  });
-  if(!res.ok)throw new Error("Error API: "+res.status);
-  const data=await res.json();
-  const text=data.content[0].text;
-  const clean=text.replace(/```json|```/g,"").trim();
-  return JSON.parse(clean);
-}
-
-// ── FRow ──
 function FRow({f,roles,onUpd,onDel}){
   const [open,setOpen]=useState(false);
   const tot=calcFase(f,roles);
@@ -193,7 +192,6 @@ function FRow({f,roles,onUpd,onDel}){
             </select>
           </div>
           <textarea value={f.desc} onChange={e=>set("desc",e.target.value)} rows={2} style={iS({width:"100%",resize:"vertical",boxSizing:"border-box",marginBottom:12})} />
-
           <div style={{fontSize:11,fontWeight:700,color:MUT,textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Equipo</div>
           {f.asig.map((a,i)=>{
             const r=roles.find(x=>x.id===a.rId);
@@ -213,7 +211,6 @@ function FRow({f,roles,onUpd,onDel}){
             );
           })}
           <button onClick={()=>{const r=roles[0];if(r)set("asig",f.asig.concat([{rId:r.id,hT:0,hB:0}]));}} style={bS}>+ Persona</button>
-
           <div style={{fontSize:11,fontWeight:700,color:MUT,textTransform:"uppercase",letterSpacing:1,marginBottom:8,marginTop:4}}>Traslados</div>
           {f.trasl.map((t,i)=>(
             <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
@@ -226,7 +223,6 @@ function FRow({f,roles,onUpd,onDel}){
             </div>
           ))}
           <button onClick={()=>set("trasl",f.trasl.concat([{cat:"Pasaje aereo",uf:0}]))} style={bS}>+ Traslado</button>
-
           <div style={{fontSize:11,fontWeight:700,color:MUT,textTransform:"uppercase",letterSpacing:1,marginBottom:8,marginTop:4}}>Materiales</div>
           {f.mat.map((m,i)=>(
             <div key={i} style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
@@ -237,7 +233,6 @@ function FRow({f,roles,onUpd,onDel}){
             </div>
           ))}
           <button onClick={()=>set("mat",f.mat.concat([{desc:"Nuevo item",uf:0}]))} style={bS}>+ Material</button>
-
           <div style={{background:BG,borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between"}}>
             <span style={{fontSize:12,color:MUT}}>Total fase</span>
             <span style={{fontSize:16,fontWeight:800,color:TXT}}>{fmtUF(tot)}</span>
@@ -248,7 +243,6 @@ function FRow({f,roles,onUpd,onDel}){
   );
 }
 
-// ── Print View ──
 function PrintView({nombre,cliente,fases,roles,costo,precio,util,ufVal,buffer,traslTot,matTot,hon,bufUF,utilUF}){
   const today=new Date().toLocaleDateString("es-CL",{year:"numeric",month:"long",day:"numeric"});
   const th={padding:"10px 14px",fontSize:12,fontWeight:700,textAlign:"left",borderBottom:"2px solid #e5e7eb",color:"#374151"};
@@ -344,14 +338,13 @@ function PrintView({nombre,cliente,fases,roles,costo,precio,util,ufVal,buffer,tr
   );
 }
 
-// ── Main App ──
 export default function App(){
   const [apiKey,setApiKey]=useState(null);
   const [nombre,setNombre]=useState("");
   const [cliente,setCliente]=useState("");
   const [roles,setRoles]=useState(R0);
   const [nRolId,setNRolId]=useState(10);
-  const [fases,setFases]=useState(F_EMPTY);
+  const [fases,setFases]=useState([]);
   const [buffer,setBuffer]=useState(15);
   const [util,setUtil]=useState(20);
   const [ufVal,setUfVal]=useState(38500);
@@ -405,7 +398,7 @@ export default function App(){
 
   const printProps={nombre,cliente,fases,roles,costo,precio,util,ufVal,buffer,traslTot,matTot,hon,bufUF,utilUF};
 
-  if(!apiKey) return <ApiKeyModal onSave={setApiKey} />;
+  if(!apiKey) return <ApiKeyModal onSave={setApiKey}/>;
 
   return (
     <div style={{fontFamily:"system-ui,sans-serif",background:BG,minHeight:"100vh",color:TXT}}>
@@ -414,11 +407,9 @@ export default function App(){
           <PrintView {...printProps}/>
         </div>
       )}
-
       <div className="no-print" style={{padding:"32px 16px"}}>
         <div style={{maxWidth:720,margin:"0 auto"}}>
 
-          {/* Header */}
           <div style={{marginBottom:20,display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
             <div style={{flex:1}}>
               <div style={{fontSize:11,fontWeight:700,letterSpacing:2,color:MUT,textTransform:"uppercase",marginBottom:6}}>Consultoría Facilitada</div>
@@ -432,14 +423,13 @@ export default function App(){
             )}
           </div>
 
-          {/* Voice panel */}
           <div style={{...cS,textAlign:"center"}}>
             <h2 style={{...h2S,textAlign:"center"}}>🎙 Describir proyecto por voz</h2>
             <p style={{fontSize:12,color:MUT,margin:"0 0 4px",lineHeight:1.7}}>
               Habla naturalmente: cliente, tipo de proyecto, fases, equipo, traslados, materiales.<br/>
               Claude estructurará la cotización automáticamente.
             </p>
-            <VoiceButton onTranscript={handleTranscript} disabled={loading} />
+            <VoiceButton onTranscript={handleTranscript} disabled={loading}/>
             {loading&&(
               <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,padding:"12px 0"}}>
                 <div style={{width:18,height:18,border:"2px solid "+BDR,borderTop:"2px solid "+GRN,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
@@ -450,7 +440,6 @@ export default function App(){
             <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
           </div>
 
-          {/* Roles */}
           <div style={cS}>
             <h2 style={h2S}>Equipo y tarifas</h2>
             <div style={{display:"flex",gap:8,fontSize:11,color:MUT,marginBottom:8,paddingBottom:8,borderBottom:"1px solid "+BDR}}>
@@ -470,7 +459,6 @@ export default function App(){
             <button onClick={()=>{setRoles(roles.concat([{id:nRolId,nombre:"Nuevo rol",terreno:3,back:2}]));setNRolId(nRolId+1);}} style={{marginTop:8,width:"100%",padding:8,border:"1px dashed "+BDR,borderRadius:8,background:"none",cursor:"pointer",fontSize:13,color:MUT}}>+ Agregar rol</button>
           </div>
 
-          {/* Params */}
           <div style={cS}>
             <h2 style={h2S}>Parametros globales</h2>
             <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
@@ -485,7 +473,6 @@ export default function App(){
             </div>
           </div>
 
-          {/* Fases */}
           <div style={cS}>
             <h2 style={h2S}>Fases del proyecto</h2>
             {fases.length===0?(
@@ -502,7 +489,6 @@ export default function App(){
             <button onClick={addFase} style={{marginTop:12,width:"100%",padding:10,border:"1px dashed "+BDR,borderRadius:8,background:"none",cursor:"pointer",fontSize:13,color:MUT}}>+ Agregar fase manualmente</button>
           </div>
 
-          {/* Resumen */}
           {fases.length>0&&(
             <div style={cS}>
               <h2 style={h2S}>Resumen de costos</h2>
@@ -557,7 +543,7 @@ export default function App(){
           )}
 
           <div style={{display:"flex",justifyContent:"flex-end",marginTop:4,marginBottom:24}}>
-            <button onClick={()=>{if(confirm("¿Cambiar API key?"))setApiKey(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#333"}}>🔑 Cambiar API key</button>
+            <button onClick={()=>{if(window.confirm("¿Cambiar API key?"))setApiKey(null);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:11,color:"#333"}}>🔑 Cambiar API key</button>
           </div>
 
         </div>
